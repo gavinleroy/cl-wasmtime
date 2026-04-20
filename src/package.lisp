@@ -1,4 +1,5 @@
 (defpackage :cl-wasmtime
+  (:nicknames :cl-wasmtime :wasmtime)
   (:use :cl :cffi)
   (:export
    ;; Conditions
