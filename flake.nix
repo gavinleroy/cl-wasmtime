@@ -12,13 +12,14 @@
       nixpkgs,
       flake-utils,
     }:
-    let
-      mkCLWasmtime = pkgs:
-        let
-          wasmtimeLib = pkgs.wasmtime.lib;
-          wasmtimeDev = pkgs.wasmtime.dev;
-        in
-        pkgs.sbcl.buildASDFSystem {
+    flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        pkgs = nixpkgs.legacyPackages.${system};
+        wasmtimeLib = pkgs.wasmtime.lib;
+        wasmtimeDev = pkgs.wasmtime.dev;
+
+        cl-wasmtime-pkg = pkgs.sbcl.buildASDFSystem {
           pname = "cl-wasmtime";
           version = "0.1.0";
           src = pkgs.lib.cleanSource self;
@@ -31,24 +32,10 @@
           nativeBuildInputs = [ wasmtimeDev ];
           postPatch = ''
             substituteInPlace src/ffi.lisp \
-              --replace-fail '"libwasmtime.so"' '"${wasmtimeLib}/lib/libwasmtime.so"' \
-              --replace-fail '"libwasmtime.dylib"' '"${wasmtimeLib}/lib/libwasmtime.dylib"'
+              --replace-fail 'libwasmtime.so' '${wasmtimeLib}/lib/libwasmtime.so' \
+              --replace-fail 'libwasmtime.dylib' '${wasmtimeLib}/lib/libwasmtime.dylib'
           '';
         };
-    in
-    {
-      overlays.default = final: prev: {
-        sbclPackages = prev.sbclPackages // {
-          cl-wasmtime = mkCLWasmtime final;
-        };
-      };
-    }
-    // flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        pkgs = nixpkgs.legacyPackages.${system};
-        wasmtimeLib = pkgs.wasmtime.lib;
-        wasmtimeDev = pkgs.wasmtime.dev;
 
         run-tests = pkgs.writeShellScriptBin "run-tests" ''
           sbcl --non-interactive \
@@ -57,18 +44,22 @@
             --eval '(sb-ext:exit :code (if (asdf:test-system "cl-wasmtime") 0 1))'
         '';
 
-        cl-wasmtime-pkg = mkCLWasmtime pkgs;
-
-        sbclWithDocs = pkgs.sbcl.withPackages (
-          ps: with ps; cl-wasmtime-pkg.lispLibs ++ [ staple ]
-        );
+        sbclWithDocs = pkgs.sbcl.withPackages (ps: with ps; cl-wasmtime-pkg.lispLibs ++ [ staple ]);
 
         documentation = pkgs.stdenv.mkDerivation {
           pname = "cl-wasmtime-documentation";
           version = "0.1.0";
           src = pkgs.lib.cleanSource self;
-          buildInputs = [ sbclWithDocs wasmtimeLib wasmtimeDev ];
-          phases = [ "unpackPhase" "buildPhase" "installPhase" ];
+          buildInputs = [
+            sbclWithDocs
+            wasmtimeLib
+            wasmtimeDev
+          ];
+          phases = [
+            "unpackPhase"
+            "buildPhase"
+            "installPhase"
+          ];
           buildPhase = ''
             export HOME=$(mktemp -d)
             export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ wasmtimeLib ]}"
@@ -94,9 +85,7 @@
         devShells.default = pkgs.mkShell {
           inputsFrom = [ cl-wasmtime-pkg ];
           packages = [
-            (pkgs.sbcl.withPackages (
-              ps: with ps; cl-wasmtime-pkg.lispLibs ++ [ staple ]
-            ))
+            (pkgs.sbcl.withPackages (ps: with ps; cl-wasmtime-pkg.lispLibs ++ [ staple ]))
             pkgs.pkg-config
             run-tests
           ];
