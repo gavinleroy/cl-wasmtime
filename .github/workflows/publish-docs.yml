@@ -1,0 +1,29 @@
+name: Publish Docs
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Build the Website
+        run: nix build .#documentation
+      - uses: JamesIves/github-pages-deploy-action@v4.3.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: gh-pages
+          folder: ./result
+          clean: true
