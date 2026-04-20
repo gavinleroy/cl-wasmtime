@@ -323,6 +323,21 @@
     (call-function store-fn 100 255)
     (is (= 255 (call-function load-fn 100)))))
 
+(test memory-ref-from-exported-memory
+  "memory-ref reads and writes bytes through exported memory."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (module (load-module-from-wat engine *memory-wat*))
+         (instance (instantiate store module nil))
+         (mem (instance-export instance "mem"))
+         (store-fn (instance-export instance "store")))
+    (is (typep mem 'wasm-memory))
+    (is (= 0 (memory-ref mem 0)))
+    (call-function store-fn 0 42)
+    (is (= 42 (memory-ref mem 0)))
+    (setf (memory-ref mem 1) 7)
+    (is (= 7 (memory-ref mem 1)))))
+
 ;;; ============================================================
 ;;; Global Tests
 ;;; ============================================================
@@ -858,4 +873,3 @@
       (call-function add-fn 1))
     (signals error
       (call-function add-fn 1 2 3))))
-

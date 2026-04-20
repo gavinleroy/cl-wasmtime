@@ -514,26 +514,28 @@
                           :functype functype))))
       (#.+wasmtime-extern-memory+
        (with-foreign-object (mem '(:struct wasmtime-memory-t))
-         (memcpy mem (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t)
-                                           'of)
-                 (foreign-type-size '(:struct wasmtime-memory-t)))
-         (make-instance 'wasm-memory
-                        :store-id (foreign-slot-value
-                                   mem '(:struct wasmtime-memory-t) 'store-id)
-                        :index (foreign-slot-value
-                                mem '(:struct wasmtime-memory-t) 'index)
-                        :store store)))
+          (memcpy mem (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t)
+                                            'of)
+                  (foreign-type-size '(:struct wasmtime-memory-t)))
+          (make-instance 'wasm-memory
+                         :store-id (foreign-slot-value
+                                    mem '(:struct wasmtime-memory-t) 'store-id)
+                         :index (foreign-slot-value
+                                 mem '(:struct wasmtime-memory-t) 'index)
+                         :store store
+                         :context context)))
       (#.+wasmtime-extern-global+
        (with-foreign-object (glob '(:struct wasmtime-global-t))
-         (memcpy glob (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t)
-                                            'of)
-                 (foreign-type-size '(:struct wasmtime-global-t)))
-         (make-instance 'wasm-global
-                        :store-id (foreign-slot-value
-                                   glob '(:struct wasmtime-global-t) 'store-id)
-                        :index (foreign-slot-value
-                                glob '(:struct wasmtime-global-t) 'index)
-                        :store store)))
+          (memcpy glob (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t)
+                                             'of)
+                  (foreign-type-size '(:struct wasmtime-global-t)))
+          (make-instance 'wasm-global
+                         :store-id (foreign-slot-value
+                                    glob '(:struct wasmtime-global-t) 'store-id)
+                         :index (foreign-slot-value
+                                 glob '(:struct wasmtime-global-t) 'index)
+                         :store store
+                         :context context)))
       (#.+wasmtime-extern-table+
        (with-foreign-object (tbl '(:struct wasmtime-table-t))
          (memcpy tbl (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t)
