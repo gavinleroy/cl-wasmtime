@@ -281,6 +281,9 @@
 ;;; Memory Tests
 ;;; ============================================================
 
+(defparameter *wasm-page-size* 65536
+  "Wasm linear memory page size in bytes.")
+
 (test memory-create
   "Memory can be created standalone."
   (let* ((engine (make-engine))
@@ -713,6 +716,138 @@
          (store (make-store engine))
          (mem (make-memory store 1)))
     (is (typep mem 'wasm-memory))))
+
+(test memory-initial-size-and-data-size
+  "New memory reports expected page and byte sizes."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 2 :max-pages 4)))
+    (is (= 2 (memory-size mem)))
+    (is (= (* 2 *wasm-page-size*)
+           (memory-data-size mem)))))
+
+(test memory-grow-updates-size
+  "Growing memory returns previous size and updates size."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 1 :max-pages 4)))
+    (is (= 1 (memory-grow mem 1)))
+    (is (= 2 (memory-size mem)))
+    (is (= (* 2 *wasm-page-size*)
+           (memory-data-size mem)))))
+
+(test memory-grow-multiple-steps
+  "Memory growth across multiple steps stays consistent."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 1 :max-pages 4)))
+    (is (= 1 (memory-grow mem 1)))
+    (is (= 2 (memory-grow mem 1)))
+    (is (= 3 (memory-grow mem 1)))
+    (is (= 4 (memory-size mem)))
+    (is (= (* 4 *wasm-page-size*)
+           (memory-data-size mem)))))
+
+(test memory-grow-past-max-signals-error
+  "Growing beyond max pages signals an error."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 1 :max-pages 2)))
+    (is (= 1 (memory-grow mem 1)))
+    (signals wasmtime-error
+      (memory-grow mem 1))))
+
+(test memory-ref-bulk-pattern-roundtrip
+  "Bulk writes and reads through memory-ref are consistent."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 1)))
+    (loop for i below 4096
+          do (setf (memory-ref mem i) (mod (* i 7) 256)))
+    (loop for i below 4096
+          do (is (= (mod (* i 7) 256)
+                    (memory-ref mem i))))))
+
+(test memory-ref-page-boundary-roundtrip
+  "Reads and writes at page boundaries behave correctly."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 1 :max-pages 3)))
+    (setf (memory-ref mem 0) 11)
+    (setf (memory-ref mem (1- *wasm-page-size*)) 22)
+    (is (= 11 (memory-ref mem 0)))
+    (is (= 22 (memory-ref mem (1- *wasm-page-size*))))
+    (memory-grow mem 1)
+    (setf (memory-ref mem *wasm-page-size*) 33)
+    (setf (memory-ref mem (1- (* 2 *wasm-page-size*))) 44)
+    (is (= 33 (memory-ref mem *wasm-page-size*)))
+    (is (= 44 (memory-ref mem (1- (* 2 *wasm-page-size*)))))))
+
+(test exported-memory-bulk-roundtrip-with-wasm
+  "Bulk writes through wasm function are visible via memory-ref."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (module (load-module-from-wat engine *memory-wat*))
+         (instance (instantiate store module nil))
+         (mem (instance-export instance "mem"))
+         (store-fn (instance-export instance "store"))
+         (load-fn (instance-export instance "load")))
+    (loop for i from 0 below 2048 by 127
+          for value = (mod (+ i 33) 256)
+          do (call-function store-fn i value))
+    (loop for i from 0 below 2048 by 127
+          for value = (mod (+ i 33) 256)
+          do (is (= value (memory-ref mem i)))
+             (is (= value (call-function load-fn i))))))
+
+(test exported-memory-direct-writes-visible-to-wasm
+  "Direct memory-ref writes are visible through wasm loads."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (module (load-module-from-wat engine *memory-wat*))
+         (instance (instantiate store module nil))
+         (mem (instance-export instance "mem"))
+         (load-fn (instance-export instance "load")))
+    (loop for i from 0 below 1024 by 97
+          for value = (mod (+ (* i 5) 1) 256)
+          do (setf (memory-ref mem i) value))
+    (loop for i from 0 below 1024 by 97
+          for value = (mod (+ (* i 5) 1) 256)
+          do (is (= value (call-function load-fn i))))))
+
+(test exported-memory-grow-and-cross-page-access
+  "Exported memory remains usable after grow across pages."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (module (load-module-from-wat engine *memory-wat*))
+         (instance (instantiate store module nil))
+         (mem (instance-export instance "mem"))
+         (store-fn (instance-export instance "store"))
+         (load-fn (instance-export instance "load"))
+         (offset (+ *wasm-page-size* 123)))
+    (is (= 1 (memory-grow mem 1)))
+    (call-function store-fn offset 199)
+    (is (= 199 (memory-ref mem offset)))
+    (setf (memory-ref mem (+ offset 1)) 77)
+    (is (= 199 (call-function load-fn offset)))
+    (is (= 77 (call-function load-fn (+ offset 1))))))
+
+(test memory-stress-repeated-grow-write-read
+  "Repeated grow/write/read cycles remain consistent."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 1 :max-pages 4)))
+    (loop for step from 1 to 3
+          do (is (= step (memory-grow mem 1)))
+             (let ((base (* step *wasm-page-size*)))
+               (loop for i from 0 below 1024 by 17
+                     for offset = (+ base i)
+                     for value = (mod (+ step i) 256)
+                     do (setf (memory-ref mem offset) value))
+               (loop for i from 0 below 1024 by 17
+                     for offset = (+ base i)
+                     for value = (mod (+ step i) 256)
+                     do (is (= value (memory-ref mem offset))))))))
 
 ;;; ============================================================
 ;;; Global Type Tests
