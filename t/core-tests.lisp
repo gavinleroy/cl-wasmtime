@@ -1008,3 +1008,120 @@
       (call-function add-fn 1))
     (signals error
       (call-function add-fn 1 2 3))))
+
+;;; ============================================================
+;;; Memory Bounds Checking Tests
+;;; ============================================================
+
+(test memory-ref-out-of-bounds-read
+  "Reading past memory bounds signals error."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 1)))
+    (signals error
+      (memory-ref mem (* 2 *wasm-page-size*)))))
+
+(test memory-ref-out-of-bounds-write
+  "Writing past memory bounds signals error."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 1)))
+    (signals error
+      (setf (memory-ref mem (* 2 *wasm-page-size*)) 42))))
+
+(test memory-ref-exact-boundary-read
+  "Reading at exact boundary signals error."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 1)))
+    (signals error
+      (memory-ref mem *wasm-page-size*))))
+
+(test memory-ref-exact-boundary-write
+  "Writing at exact boundary signals error."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 1)))
+    (signals error
+      (setf (memory-ref mem *wasm-page-size*) 42))))
+
+(test memory-ref-last-valid-byte
+  "Reading/writing last valid byte works."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 1)))
+    (setf (memory-ref mem (1- *wasm-page-size*)) 255)
+    (is (= 255 (memory-ref mem (1- *wasm-page-size*))))))
+
+(test memory-ref-after-grow-new-region
+  "After grow, new region accessible via memory-ref."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 1 :max-pages 2)))
+    (memory-grow mem 1)
+    (setf (memory-ref mem *wasm-page-size*) 77)
+    (is (= 77 (memory-ref mem *wasm-page-size*)))))
+
+(test memory-ref-negative-offset-signals-error
+  "Negative offset treated as large positive, signals error."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 1)))
+    (signals error
+      (memory-ref mem most-positive-fixnum))))
+
+;;; ============================================================
+;;; Context Freshness Tests
+;;; ============================================================
+
+(test memory-context-always-fresh
+  "Memory context derived from store each time."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (mem (make-memory store 1)))
+    (is (= (memory-data-size mem) *wasm-page-size*))
+    (memory-grow mem 1)
+    (is (= (memory-data-size mem) (* 2 *wasm-page-size*)))))
+
+(test global-standalone-read-write
+  "Standalone global read/write works."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (module (load-module-from-wat engine *global-wat*))
+         (linker (make-linker engine))
+         (instance (linker-instantiate linker store module))
+         (counter (instance-export instance "counter"))
+         (inc-fn (instance-export instance "inc"))
+         (get-fn (instance-export instance "get")))
+    (is (typep counter 'wasm-global))
+    (is (= 0 (call-function get-fn)))
+    (call-function inc-fn)
+    (call-function inc-fn)
+    (is (= 2 (call-function get-fn)))))
+
+;;; ============================================================
+;;; Host Function Cleanup Tests
+;;; ============================================================
+
+(test host-function-creation-basic
+  "Host function created and callable."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (fn (make-host-function store '(:i32) '(:i32)
+                                 (lambda (x) (* x 3)))))
+    (is (typep fn 'wasm-func))
+    (is (= 15 (call-function fn 5)))))
+
+(test linker-define-func-multiple
+  "Multiple linker-define-func calls work."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (linker (make-linker engine)))
+    (linker-define-func linker "env" "add" '(:i32 :i32) '(:i32)
+                        (lambda (a b) (+ a b)))
+    (linker-define-func linker "env" "mul" '(:i32 :i32) '(:i32)
+                        (lambda (a b) (* a b)))
+    (let ((add-fn (linker-get linker store "env" "add"))
+          (mul-fn (linker-get linker store "env" "mul")))
+      (is (= 5 (call-function add-fn 2 3)))
+      (is (= 6 (call-function mul-fn 2 3))))))
