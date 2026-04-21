@@ -19,17 +19,20 @@
 
 (defun check-wasmtime-error (err-ptr &optional trap-ptr)
   "Signal condition if error or trap occurred."
-  (when (and trap-ptr (not (null-pointer-p trap-ptr)))
-    (let ((trap (mem-ref trap-ptr :pointer)))
-      (unless (null-pointer-p trap)
-        (let ((msg (extract-trap-message trap))
-              (code (extract-trap-code trap)))
-          (%wasm-trap-delete trap)
-          (error 'wasm-trap :message msg :code code)))))
-  (unless (null-pointer-p err-ptr)
-    (let ((msg (extract-error-message err-ptr)))
-      (%wasmtime-error-delete err-ptr)
-      (error 'wasmtime-error :message msg))))
+  (let ((trap-msg nil) (trap-code nil) (err-msg nil))
+    (when (and trap-ptr (not (null-pointer-p trap-ptr)))
+      (let ((trap (mem-ref trap-ptr :pointer)))
+        (unless (null-pointer-p trap)
+          (setf trap-msg (extract-trap-message trap)
+                trap-code (extract-trap-code trap))
+          (%wasm-trap-delete trap))))
+    (unless (null-pointer-p err-ptr)
+      (setf err-msg (extract-error-message err-ptr))
+      (%wasmtime-error-delete err-ptr))
+    (when trap-msg
+      (error 'wasm-trap :message trap-msg :code trap-code))
+    (when err-msg
+      (error 'wasmtime-error :message err-msg))))
 
 (defun extract-error-message (err-ptr)
   (with-foreign-object (vec '(:struct wasm-byte-vec-t))
@@ -97,13 +100,12 @@
 (defun make-engine (&optional config)
   "Create new Wasmtime engine, optionally with config."
   (let* ((ptr (if config
-                  (let ((cfg-ptr (config-pointer config)))
+                  (let* ((cfg-ptr (config-pointer config))
+                         (eng-ptr (%wasm-engine-new-with-config cfg-ptr)))
+                    (when (null-pointer-p eng-ptr)
+                      (error "Failed to create engine"))
                     (tg:cancel-finalization config)
-                    (let ((eng-ptr (%wasm-engine-new-with-config cfg-ptr)))
-                      (when (null-pointer-p eng-ptr)
-                        (%wasm-config-delete cfg-ptr)
-                        (error "Failed to create engine"))
-                      eng-ptr))
+                    eng-ptr)
                   (%wasm-engine-new)))
          (engine (make-instance 'engine :pointer ptr)))
     (tg:finalize engine (lambda () (%wasm-engine-delete ptr)))
@@ -314,13 +316,20 @@
   ((pointer :initarg :pointer
             :reader linker-pointer)
    (engine :initarg :engine
-           :reader linker-engine)))
+           :reader linker-engine)
+   (callback-ids :initform nil
+                 :accessor linker-callback-ids)))
 
 (defun make-linker (engine)
   "Create new linker for engine."
   (let* ((ptr (%wasmtime-linker-new (engine-pointer engine)))
          (linker (make-instance 'linker :pointer ptr :engine engine)))
-    (tg:finalize linker (lambda () (%wasmtime-linker-delete ptr)))
+    (tg:finalize linker
+                 (let ((ids (linker-callback-ids linker)))
+                   (lambda ()
+                     (dolist (id ids)
+                       (remhash id *callback-registry*))
+                     (%wasmtime-linker-delete ptr))))
     linker))
 
 (defun linker-allow-shadowing (linker allow)
@@ -375,7 +384,7 @@
                                         field-name (length field-name)
                                         ext)))
       (when found
-        (extern-from-c ext store context)))))
+        (extern-from-c ext store)))))
 
 ;;; ============================================================
 ;;; INSTANCE
@@ -431,7 +440,7 @@
                                                  name (length name)
                                                  ext)))
       (when found
-        (extern-from-c ext store context)))))
+        (extern-from-c ext store)))))
 
 (defun instance-exports (instance)
   "Get all exports as alist ((name . extern) ...)."
@@ -454,7 +463,7 @@
             do (let ((name (foreign-string-to-lisp
                             (mem-ref name-out :pointer)
                             :count (mem-ref name-len-out :size)))
-                     (extern (extern-from-c ext store context)))
+                     (extern (extern-from-c ext store)))
                  (push (cons name extern) result))))
     (nreverse result)))
 
@@ -471,33 +480,31 @@
 (defclass wasm-memory ()
   ((store-id :initarg :store-id :reader memory-store-id)
    (index :initarg :index :reader memory-index)
-   (store :initarg :store :reader memory-store)
-   (context :initarg :context :initform nil :accessor memory-context-cached)))
+   (index2 :initarg :index2 :reader memory-index2)
+   (store :initarg :store :reader memory-store)))
 
 (defun memory-context (memory)
-  "Get context for memory, using cached value or deriving from store."
-  (or (memory-context-cached memory)
-      (store-context (memory-store memory))))
+  "Get context for memory, always derived fresh from store."
+  (store-context (memory-store memory)))
 
 (defclass wasm-global ()
   ((store-id :initarg :store-id :reader global-store-id)
    (index :initarg :index :reader global-index)
-   (store :initarg :store :reader global-store)
-   (context :initarg :context :initform nil :accessor global-context-cached)))
+   (store :initarg :store :reader global-store)))
 
 (defun global-context (global)
-  "Get context for global, using cached value or deriving from store."
-  (or (global-context-cached global)
-      (store-context (global-store global))))
+  "Get context for global, always derived fresh from store."
+  (store-context (global-store global)))
 
 (defclass wasm-table ()
   ((store-id :initarg :store-id :reader table-store-id)
    (index :initarg :index :reader table-index)
    (store :initarg :store :reader table-store)))
 
-(defun extern-from-c (ext-ptr store context)
+(defun extern-from-c (ext-ptr store)
   "Convert C extern struct to Lisp object."
-  (let ((kind (foreign-slot-value ext-ptr '(:struct wasmtime-extern-t) 'kind)))
+  (let ((kind (foreign-slot-value ext-ptr '(:struct wasmtime-extern-t) 'kind))
+        (context (store-context store)))
     (case kind
       (#.+wasmtime-extern-func+
        (with-foreign-object (func '(:struct wasmtime-func-t))
@@ -514,26 +521,28 @@
                           :functype functype))))
       (#.+wasmtime-extern-memory+
        (with-foreign-object (mem '(:struct wasmtime-memory-t))
-         (memcpy mem (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t)
-                                           'of)
-                 (foreign-type-size '(:struct wasmtime-memory-t)))
-         (make-instance 'wasm-memory
-                        :store-id (foreign-slot-value
-                                   mem '(:struct wasmtime-memory-t) 'store-id)
-                        :index (foreign-slot-value
-                                mem '(:struct wasmtime-memory-t) 'index)
-                        :store store)))
+          (memcpy mem (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t)
+                                            'of)
+                  (foreign-type-size '(:struct wasmtime-memory-t)))
+          (make-instance 'wasm-memory
+                         :store-id (foreign-slot-value
+                                    mem '(:struct wasmtime-memory-t) 'store-id)
+                         :index (foreign-slot-value
+                                  mem '(:struct wasmtime-memory-t) 'index)
+                         :index2 (foreign-slot-value
+                                  mem '(:struct wasmtime-memory-t) 'index2)
+                         :store store)))
       (#.+wasmtime-extern-global+
        (with-foreign-object (glob '(:struct wasmtime-global-t))
-         (memcpy glob (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t)
-                                            'of)
-                 (foreign-type-size '(:struct wasmtime-global-t)))
-         (make-instance 'wasm-global
-                        :store-id (foreign-slot-value
-                                   glob '(:struct wasmtime-global-t) 'store-id)
-                        :index (foreign-slot-value
-                                glob '(:struct wasmtime-global-t) 'index)
-                        :store store)))
+          (memcpy glob (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t)
+                                             'of)
+                  (foreign-type-size '(:struct wasmtime-global-t)))
+          (make-instance 'wasm-global
+                         :store-id (foreign-slot-value
+                                    glob '(:struct wasmtime-global-t) 'store-id)
+                         :index (foreign-slot-value
+                                 glob '(:struct wasmtime-global-t) 'index)
+                         :store store)))
       (#.+wasmtime-extern-table+
        (with-foreign-object (tbl '(:struct wasmtime-table-t))
          (memcpy tbl (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t)
@@ -548,6 +557,7 @@
 
 (defun extern-to-c (extern store ext-ptr)
   "Convert Lisp extern object to C extern struct."
+  (declare (ignore store))
   (etypecase extern
     (wasm-func
      (setf (foreign-slot-value ext-ptr '(:struct wasmtime-extern-t) 'kind)
@@ -559,10 +569,16 @@
     (wasm-memory
      (setf (foreign-slot-value ext-ptr '(:struct wasmtime-extern-t) 'kind)
            +wasmtime-extern-memory+)
-     (let ((of-ptr (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t)
-                                         'of)))
-       (setf (mem-ref of-ptr :uint64) (memory-store-id extern))
-       (setf (mem-ref (inc-pointer of-ptr 8) :size) (memory-index extern))))
+     (with-foreign-object (mem '(:struct wasmtime-memory-t))
+       (setf (foreign-slot-value mem '(:struct wasmtime-memory-t) 'store-id)
+             (memory-store-id extern))
+       (setf (foreign-slot-value mem '(:struct wasmtime-memory-t) 'index)
+             (memory-index extern))
+       (setf (foreign-slot-value mem '(:struct wasmtime-memory-t) 'index2)
+             (memory-index2 extern))
+       (memcpy (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t) 'of)
+               mem
+               (foreign-type-size '(:struct wasmtime-memory-t)))))
     (wasm-global
      (setf (foreign-slot-value ext-ptr '(:struct wasmtime-extern-t) 'kind)
            +wasmtime-extern-global+)
@@ -594,7 +610,12 @@
          (functype (or (func-functype func)
                        (get-func-type context func)))
          (result-count (functype-result-count functype))
-         (param-types (functype-param-types functype)))
+         (param-types (functype-param-types functype))
+         (expected-args (length param-types)))
+    (when (/= num-args expected-args)
+      (error "Function expects ~D argument~:P but got ~D."
+             expected-args
+             num-args))
     (with-foreign-objects ((func-c '(:struct wasmtime-func-t))
                            (args-c '(:struct wasmtime-val-t) (max 1 num-args))
                            (results-c '(:struct wasmtime-val-t)
@@ -715,8 +736,9 @@
                                 mem-out '(:struct wasmtime-memory-t) 'store-id)
                      :index (foreign-slot-value
                              mem-out '(:struct wasmtime-memory-t) 'index)
-                     :store store
-                     :context ctx))))
+                     :index2 (foreign-slot-value
+                              mem-out '(:struct wasmtime-memory-t) 'index2)
+                     :store store))))
 
 (defun memory-data (memory)
   "Get raw pointer to memory data.
@@ -727,6 +749,8 @@ Call memory-data again after any grow operation to get a valid pointer."
           (memory-store-id memory))
     (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index)
           (memory-index memory))
+    (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index2)
+          (memory-index2 memory))
     (%wasmtime-memory-data (memory-context memory) mem-c)))
 
 (defun memory-data-size (memory)
@@ -736,6 +760,8 @@ Call memory-data again after any grow operation to get a valid pointer."
           (memory-store-id memory))
     (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index)
           (memory-index memory))
+    (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index2)
+          (memory-index2 memory))
     (%wasmtime-memory-data-size (memory-context memory) mem-c)))
 
 (defun memory-size (memory)
@@ -745,6 +771,8 @@ Call memory-data again after any grow operation to get a valid pointer."
           (memory-store-id memory))
     (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index)
           (memory-index memory))
+    (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index2)
+          (memory-index2 memory))
     (%wasmtime-memory-size (memory-context memory) mem-c)))
 
 (defun memory-grow (memory delta)
@@ -755,6 +783,8 @@ Call memory-data again after any grow operation to get a valid pointer."
           (memory-store-id memory))
     (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index)
           (memory-index memory))
+    (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index2)
+          (memory-index2 memory))
     (let ((err (%wasmtime-memory-grow (memory-context memory)
                                       mem-c delta prev-size)))
       (check-wasmtime-error err)
@@ -762,11 +792,17 @@ Call memory-data again after any grow operation to get a valid pointer."
 
 (defun memory-ref (memory offset)
   "Read byte from memory at offset."
-  (mem-aref (memory-data memory) :uint8 offset))
+  (let ((size (memory-data-size memory)))
+    (when (>= offset size)
+      (error "Memory access out of bounds: offset ~D, size ~D" offset size))
+    (mem-aref (memory-data memory) :uint8 offset)))
 
 (defun (setf memory-ref) (value memory offset)
   "Write byte to memory at offset."
-  (setf (mem-aref (memory-data memory) :uint8 offset) value))
+  (let ((size (memory-data-size memory)))
+    (when (>= offset size)
+      (error "Memory access out of bounds: offset ~D, size ~D" offset size))
+    (setf (mem-aref (memory-data memory) :uint8 offset) value)))
 
 ;;; ============================================================
 ;;; GLOBAL
@@ -789,8 +825,7 @@ Call memory-data again after any grow operation to get a valid pointer."
                                 glob-out '(:struct wasmtime-global-t) 'store-id)
                      :index (foreign-slot-value
                              glob-out '(:struct wasmtime-global-t) 'index)
-                     :store store
-                     :context ctx))))
+                     :store store))))
 
 (defun lisp-type-to-wasm-kind (type)
   (case type
@@ -1057,34 +1092,43 @@ Call memory-data again after any grow operation to get a valid pointer."
   "Create WASM function that calls Lisp FN.
 PARAMS/RESULTS are lists of types (:i32 :i64 :f32 :f64)."
   (let* ((id (incf *callback-counter*))
-         (functype (make-functype params results)))
-    (setf (gethash id *callback-registry*) fn)
-    (with-foreign-object (func-out '(:struct wasmtime-func-t))
-      (%wasmtime-func-new (store-context store)
-                          functype
-                          (callback host-func-trampoline)
-                          (make-pointer id)
-                          (null-pointer)
-                          func-out)
-      (let ((func (make-instance 'wasm-func
-                                 :store-id (foreign-slot-value
-                                            func-out '(:struct wasmtime-func-t)
-                                            'store-id)
-                                 :index (foreign-slot-value
-                                         func-out '(:struct wasmtime-func-t)
-                                         'index)
-                                 :store store
-                                 :functype functype)))
-        (tg:finalize func (lambda ()
-                            (%wasm-functype-delete functype)
-                            (remhash id *callback-registry*)))
-        func))))
+         (functype (make-functype params results))
+         (func nil))
+    (unwind-protect
+         (progn
+           (setf (gethash id *callback-registry*) fn)
+           (with-foreign-object (func-out '(:struct wasmtime-func-t))
+             (%wasmtime-func-new (store-context store)
+                                 functype
+                                 (callback host-func-trampoline)
+                                 (make-pointer id)
+                                 (null-pointer)
+                                 func-out)
+             (setf func (make-instance 'wasm-func
+                                       :store-id (foreign-slot-value
+                                                  func-out
+                                                  '(:struct wasmtime-func-t)
+                                                  'store-id)
+                                       :index (foreign-slot-value
+                                               func-out
+                                               '(:struct wasmtime-func-t)
+                                               'index)
+                                       :store store
+                                       :functype functype))
+             (tg:finalize func (lambda ()
+                                 (%wasm-functype-delete functype)
+                                 (remhash id *callback-registry*)))
+             func))
+      (unless func
+        (%wasm-functype-delete functype)
+        (remhash id *callback-registry*)))))
 
 (defun linker-define-func (linker module-name field-name params results fn)
   "Define host function in linker."
   (let* ((id (incf *callback-counter*))
          (functype (make-functype params results)))
     (setf (gethash id *callback-registry*) fn)
+    (push id (linker-callback-ids linker))
     (let ((err (%wasmtime-linker-define-func (linker-pointer linker)
                                              module-name (length module-name)
                                              field-name (length field-name)
