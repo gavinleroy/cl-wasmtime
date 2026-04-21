@@ -107,9 +107,9 @@
 (defcstruct wasmtime-memory-t
   (store-id :uint64)
   (index :uint32)
-  (padding1 :uint32)
+  (index-padding :uint32)
   (index2 :uint32)
-  (padding2 :uint32))
+  (index2-padding :uint32))
 
 (defcstruct wasmtime-global-t
   (store-id :uint64)

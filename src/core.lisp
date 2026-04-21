@@ -565,11 +565,16 @@
     (wasm-memory
      (setf (foreign-slot-value ext-ptr '(:struct wasmtime-extern-t) 'kind)
            +wasmtime-extern-memory+)
-      (let ((of-ptr (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t)
-                                          'of)))
-        (setf (mem-ref of-ptr :uint64) (memory-store-id extern))
-        (setf (mem-ref (inc-pointer of-ptr 8) :uint32) (memory-index extern))
-        (setf (mem-ref (inc-pointer of-ptr 16) :uint32) (memory-index2 extern))))
+     (with-foreign-object (mem '(:struct wasmtime-memory-t))
+       (setf (foreign-slot-value mem '(:struct wasmtime-memory-t) 'store-id)
+             (memory-store-id extern))
+       (setf (foreign-slot-value mem '(:struct wasmtime-memory-t) 'index)
+             (memory-index extern))
+       (setf (foreign-slot-value mem '(:struct wasmtime-memory-t) 'index2)
+             (memory-index2 extern))
+       (memcpy (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t) 'of)
+               mem
+               (foreign-type-size '(:struct wasmtime-memory-t)))))
     (wasm-global
      (setf (foreign-slot-value ext-ptr '(:struct wasmtime-extern-t) 'kind)
            +wasmtime-extern-global+)
