@@ -606,7 +606,12 @@
          (functype (or (func-functype func)
                        (get-func-type context func)))
          (result-count (functype-result-count functype))
-         (param-types (functype-param-types functype)))
+         (param-types (functype-param-types functype))
+         (expected-args (length param-types)))
+    (when (/= num-args expected-args)
+      (error "Function expects ~D argument~:P but got ~D."
+             expected-args
+             num-args))
     (with-foreign-objects ((func-c '(:struct wasmtime-func-t))
                            (args-c '(:struct wasmtime-val-t) (max 1 num-args))
                            (results-c '(:struct wasmtime-val-t)
