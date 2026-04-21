@@ -471,6 +471,7 @@
 (defclass wasm-memory ()
   ((store-id :initarg :store-id :reader memory-store-id)
    (index :initarg :index :reader memory-index)
+   (index2 :initarg :index2 :reader memory-index2)
    (store :initarg :store :reader memory-store)
    (context :initarg :context :initform nil :accessor memory-context-cached)))
 
@@ -521,7 +522,9 @@
                          :store-id (foreign-slot-value
                                     mem '(:struct wasmtime-memory-t) 'store-id)
                          :index (foreign-slot-value
-                                 mem '(:struct wasmtime-memory-t) 'index)
+                                  mem '(:struct wasmtime-memory-t) 'index)
+                         :index2 (foreign-slot-value
+                                  mem '(:struct wasmtime-memory-t) 'index2)
                          :store store
                          :context context)))
       (#.+wasmtime-extern-global+
@@ -550,6 +553,7 @@
 
 (defun extern-to-c (extern store ext-ptr)
   "Convert Lisp extern object to C extern struct."
+  (declare (ignore store))
   (etypecase extern
     (wasm-func
      (setf (foreign-slot-value ext-ptr '(:struct wasmtime-extern-t) 'kind)
@@ -561,10 +565,11 @@
     (wasm-memory
      (setf (foreign-slot-value ext-ptr '(:struct wasmtime-extern-t) 'kind)
            +wasmtime-extern-memory+)
-     (let ((of-ptr (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t)
-                                         'of)))
-       (setf (mem-ref of-ptr :uint64) (memory-store-id extern))
-       (setf (mem-ref (inc-pointer of-ptr 8) :size) (memory-index extern))))
+      (let ((of-ptr (foreign-slot-pointer ext-ptr '(:struct wasmtime-extern-t)
+                                          'of)))
+        (setf (mem-ref of-ptr :uint64) (memory-store-id extern))
+        (setf (mem-ref (inc-pointer of-ptr 8) :uint32) (memory-index extern))
+        (setf (mem-ref (inc-pointer of-ptr 16) :uint32) (memory-index2 extern))))
     (wasm-global
      (setf (foreign-slot-value ext-ptr '(:struct wasmtime-extern-t) 'kind)
            +wasmtime-extern-global+)
@@ -712,13 +717,15 @@
            (err (%wasmtime-memory-new ctx memtype mem-out)))
       (%wasm-memorytype-delete memtype)
       (check-wasmtime-error err)
-      (make-instance 'wasm-memory
-                     :store-id (foreign-slot-value
-                                mem-out '(:struct wasmtime-memory-t) 'store-id)
-                     :index (foreign-slot-value
-                             mem-out '(:struct wasmtime-memory-t) 'index)
-                     :store store
-                     :context ctx))))
+       (make-instance 'wasm-memory
+                      :store-id (foreign-slot-value
+                                 mem-out '(:struct wasmtime-memory-t) 'store-id)
+                      :index (foreign-slot-value
+                              mem-out '(:struct wasmtime-memory-t) 'index)
+                      :index2 (foreign-slot-value
+                               mem-out '(:struct wasmtime-memory-t) 'index2)
+                      :store store
+                      :context ctx))))
 
 (defun memory-data (memory)
   "Get raw pointer to memory data.
@@ -729,6 +736,8 @@ Call memory-data again after any grow operation to get a valid pointer."
           (memory-store-id memory))
     (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index)
           (memory-index memory))
+    (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index2)
+          (memory-index2 memory))
     (%wasmtime-memory-data (memory-context memory) mem-c)))
 
 (defun memory-data-size (memory)
@@ -738,6 +747,8 @@ Call memory-data again after any grow operation to get a valid pointer."
           (memory-store-id memory))
     (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index)
           (memory-index memory))
+    (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index2)
+          (memory-index2 memory))
     (%wasmtime-memory-data-size (memory-context memory) mem-c)))
 
 (defun memory-size (memory)
@@ -747,6 +758,8 @@ Call memory-data again after any grow operation to get a valid pointer."
           (memory-store-id memory))
     (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index)
           (memory-index memory))
+    (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index2)
+          (memory-index2 memory))
     (%wasmtime-memory-size (memory-context memory) mem-c)))
 
 (defun memory-grow (memory delta)
@@ -757,6 +770,8 @@ Call memory-data again after any grow operation to get a valid pointer."
           (memory-store-id memory))
     (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index)
           (memory-index memory))
+    (setf (foreign-slot-value mem-c '(:struct wasmtime-memory-t) 'index2)
+          (memory-index2 memory))
     (let ((err (%wasmtime-memory-grow (memory-context memory)
                                       mem-c delta prev-size)))
       (check-wasmtime-error err)
