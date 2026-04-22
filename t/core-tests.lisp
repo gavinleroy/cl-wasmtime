@@ -299,18 +299,24 @@
     (is (typep mem 'wasm-memory))))
 
 (test memory-grow
-  "Memory object can be created for growing."
+  "Standalone memory can be grown."
   (let* ((engine (make-engine))
          (store (make-store engine))
          (mem (make-memory store 1 :max-pages 4)))
-    (is (typep mem 'wasm-memory))))
+    (is (= 1 (memory-size mem)))
+    (is (= 1 (memory-grow mem 2)))
+    (is (= 3 (memory-size mem)))))
 
 (test memory-read-write
-  "Memory object can be created."
+  "Standalone memory supports read/write via memory-ref."
   (let* ((engine (make-engine))
          (store (make-store engine))
          (mem (make-memory store 1)))
-    (is (typep mem 'wasm-memory))))
+    (is (= 0 (memory-ref mem 0)))
+    (setf (memory-ref mem 0) 42)
+    (is (= 42 (memory-ref mem 0)))
+    (setf (memory-ref mem 100) 255)
+    (is (= 255 (memory-ref mem 100)))))
 
 (test memory-from-module
   "Memory exported from module works."
@@ -555,12 +561,22 @@
   "Module with table and indirect calls.")
 
 (test table-create
-  "Table creation API exists."
-  (is (fboundp 'make-table)))
+  "Table export is recognized as wasm-table."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (module (load-module-from-wat engine *table-wat*))
+         (linker (make-linker engine))
+         (instance (linker-instantiate
+                    linker store module))
+         (tbl (instance-export instance "tbl")))
+    (is (typep tbl 'wasm-table))))
 
 (test table-grow
-  "Table grow API exists."
-  (is (fboundp 'table-grow)))
+  "Table export type appears in module exports."
+  (let* ((engine (make-engine))
+         (module (load-module-from-wat engine *table-wat*))
+         (exports (module-exports module)))
+    (is (find :table exports :key #'second))))
 
 (test table-from-module
   "Table exported from module works."
@@ -704,18 +720,24 @@
 ;;; ============================================================
 
 (test memory-grow-failure
-  "Memory object can be created with max constraint."
+  "Growing past max in one step signals error."
   (let* ((engine (make-engine))
          (store (make-store engine))
          (mem (make-memory store 1 :max-pages 2)))
-    (is (typep mem 'wasm-memory))))
+    (signals wasmtime-error
+      (memory-grow mem 5))))
 
 (test memory-boundary-access
-  "Memory object can be created."
+  "First and last bytes of a page are accessible."
   (let* ((engine (make-engine))
          (store (make-store engine))
          (mem (make-memory store 1)))
-    (is (typep mem 'wasm-memory))))
+    (setf (memory-ref mem 0) 1)
+    (setf (memory-ref mem (1- *wasm-page-size*)) 2)
+    (is (= 1 (memory-ref mem 0)))
+    (is (= 2 (memory-ref mem (1- *wasm-page-size*))))
+    (signals error
+      (memory-ref mem *wasm-page-size*))))
 
 (test memory-initial-size-and-data-size
   "New memory reports expected page and byte sizes."
@@ -920,23 +942,37 @@
 ;;; Linker Define Tests
 ;;; ============================================================
 
+(defparameter *import-memory-wat*
+  "(module
+     (import \"env\" \"mem\" (memory 1))
+     (func (export \"load\") (param i32) (result i32)
+       local.get 0
+       i32.load8_u))"
+  "Module that imports memory from env.")
+
 (test linker-define-memory
-  "Memory can be created for linker."
+  "Memory defined in linker is usable by module."
   (let* ((engine (make-engine))
          (store (make-store engine))
          (linker (make-linker engine))
-         (mem (make-memory store 1)))
-    (declare (ignore linker))
-    (is (typep mem 'wasm-memory))))
+         (mem (make-memory store 1))
+         (module (load-module-from-wat
+                  engine *import-memory-wat*)))
+    (setf (memory-ref mem 7) 99)
+    (linker-define linker store "env" "mem" mem)
+    (let* ((inst (linker-instantiate
+                  linker store module))
+           (load-fn (instance-export inst "load")))
+      (is (= 99 (call-function load-fn 7))))))
 
 (test linker-define-global
-  "Global can be created for linker."
+  "Standalone global can be created with various types."
   (let* ((engine (make-engine))
          (store (make-store engine))
-         (linker (make-linker engine))
-         (glob (make-global store :i32 42)))
-    (declare (ignore linker))
-    (is (typep glob 'wasm-global))))
+         (g1 (make-global store :i32 42))
+         (g2 (make-global store :i64 100 :mutable t)))
+    (is (typep g1 'wasm-global))
+    (is (typep g2 'wasm-global))))
 ;;; ============================================================
 ;;; File I/O Tests
 ;;; ============================================================
@@ -1083,8 +1119,8 @@
     (memory-grow mem 1)
     (is (= (memory-data-size mem) (* 2 *wasm-page-size*)))))
 
-(test global-standalone-read-write
-  "Standalone global read/write works."
+(test global-from-module-read-write
+  "Module-exported mutable global can be mutated via wasm."
   (let* ((engine (make-engine))
          (store (make-store engine))
          (module (load-module-from-wat engine *global-wat*))
@@ -1117,11 +1153,43 @@
   (let* ((engine (make-engine))
          (store (make-store engine))
          (linker (make-linker engine)))
-    (linker-define-func linker "env" "add" '(:i32 :i32) '(:i32)
+    (linker-define-func linker "env" "add"
+                        '(:i32 :i32) '(:i32)
                         (lambda (a b) (+ a b)))
-    (linker-define-func linker "env" "mul" '(:i32 :i32) '(:i32)
+    (linker-define-func linker "env" "mul"
+                        '(:i32 :i32) '(:i32)
                         (lambda (a b) (* a b)))
     (let ((add-fn (linker-get linker store "env" "add"))
           (mul-fn (linker-get linker store "env" "mul")))
       (is (= 5 (call-function add-fn 2 3)))
       (is (= 6 (call-function mul-fn 2 3))))))
+
+;;; ============================================================
+;;; Host Callback Error Handling Tests
+;;; ============================================================
+
+(defparameter *call-import-wat*
+  "(module
+     (import \"env\" \"f\" (func $f (param i32) (result i32)))
+     (func (export \"call_it\") (param i32) (result i32)
+       local.get 0
+       call $f))"
+  "Module that calls an imported function.")
+
+(test host-callback-error-becomes-trap
+  "Lisp error in host callback becomes wasm trap."
+  (let* ((engine (make-engine))
+         (store (make-store engine))
+         (linker (make-linker engine)))
+    (linker-define-func linker "env" "f"
+                        '(:i32) '(:i32)
+                        (lambda (x)
+                          (declare (ignore x))
+                          (error "deliberate error")))
+    (let* ((module (load-module-from-wat
+                    engine *call-import-wat*))
+           (inst (linker-instantiate
+                  linker store module))
+           (call-fn (instance-export inst "call_it")))
+      (signals wasmtime-error
+        (call-function call-fn 1)))))
